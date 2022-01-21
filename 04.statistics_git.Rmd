@@ -1,0 +1,1707 @@
+---
+title: "Barn Swallow diet"
+author: "Jakub Kreisinger"
+date: "December 20, 2021"
+output: html_document
+---
+
+#Packages and custom functions
+
+```{r warning=F, message=F}
+library(sciplot)
+library(ggh4x)
+library(Polychrome)
+library(ape)
+library(ggpubr)
+library(plyr)
+library(vegan)
+library(rptR)
+library(boral)
+library(DESeq2)
+library(phyloseq)
+library(boral)
+
+#function for the adjustment of taxonomic levels within a phyloseq object
+manage_unassigned<-function(PHYLOSEQ,UNASS_STRING=NA,ADD,AFTER=TRUE){
+   TAXall<-data.frame(tax_table(PHYLOSEQ),stringsAsFactors = F)
+   if(!is.na(UNASS_STRING)){TAXall[TAXall==UNASS_STRING]<-NA}
+   # TAXall<-as.character(TAXall[i,])
+   for(i in 1:dim(TAXall)[1]){  
+       TAX<-as.character(TAXall[i,])
+       if(AFTER==TRUE) {for(j in 2: length(TAX)){
+                            if(is.na(TAX[j])){TAX[j]<-ifelse(regexpr(ADD,TAX[j-1])>0,
+                                           TAX[j-1],paste(TAX[j-1],ADD,sep=""))}}}
+      if(AFTER==FALSE) {for(j in 2: length(TAX)){
+                            if(is.na(TAX[j])){TAX[j]<-ifelse(regexpr(ADD,TAX[j-1])>0,
+                                     TAX[j-1],ADD,paste(TAX[j-1],sep=""))}}}
+      TAXall[i,]<-TAX
+    }
+   TAXA<-colnames(TAXall)
+   SPECIES<-rownames(TAXall)
+   TAXall<-tax_table(TAXall)
+   taxa_names(TAXall)<-SPECIES
+   colnames(TAXall)<-TAXA
+   tax_table(PHYLOSEQ)<-TAXall
+  
+   #output
+   PHYLOSEQ
+}
+
+#rarefaction curves for phyloseq data
+calculate_rarefaction_curves <- function(psdata, measures, depths) {
+  require('plyr') # ldply
+  require('reshape2') # melt
+
+  estimate_rarified_richness <- function(psdata, measures, depth) {
+    if(max(sample_sums(psdata)) < depth) return()
+    psdata <- prune_samples(sample_sums(psdata) >= depth, psdata)
+
+    rarified_psdata <- rarefy_even_depth(psdata, depth, verbose = FALSE)
+
+    alpha_diversity <- estimate_richness(rarified_psdata, measures = measures)
+
+    # as.matrix forces the use of melt.array, which includes the Sample names (rownames)
+    molten_alpha_diversity <- melt(as.matrix(alpha_diversity), 
+                                   varnames = c('Sample', 'Measure'), value.name = 'Alpha_diversity')
+
+    molten_alpha_diversity
+  }
+
+  names(depths) <- depths # this enables automatic addition of the Depth to the output by ldply
+  rarefaction_curve_data <- ldply(depths, estimate_rarified_richness, psdata = psdata, measures = measures, .id = 'Depth', .progress = ifelse(interactive(), 'text', 'none'))
+
+  # convert Depth from factor to numeric
+  rarefaction_curve_data$Depth <- as.numeric(levels(rarefaction_curve_data$Depth))[rarefaction_curve_data$Depth]
+
+  rarefaction_curve_data
+}
+
+source("~/software/Rfunctions/multiplot.R")
+
+#This function takes ASVs abundances and associated taxonomy plus metadata from a phyloseq objects 
+#and  convert these information to long-format data.frame (for the purpose of ggplot)
+phyloseq_2_GG<-function(which.taxa,which.phyloseq,manage.ussigned=NULL,unassign.string=NULL){  
+  RESULT<-data.frame(stringsAsFactors = F)
+  SSUMS<-sample_sums(which.phyloseq)
+  for(i in 1: length(which.taxa))
+    {
+      actual.phylos<-prune_taxa(taxa_names(which.phyloseq)%in%which.taxa[i],which.phyloseq)
+      Abundance<-as.numeric(otu_table(actual.phylos))  
+      OTU<-rep(which.taxa[i],length(Abundance))
+      Seq.tot<-rep(SSUMS[i],length(Abundance))
+      Taxo.actual<-as.character(tax_table(actual.phylos))
+      if(manage.ussigned==T){
+        for(j in 2: length(Taxo.actual)){
+          if(is.na(Taxo.actual[j])){Taxo.actual[j]<-ifelse(regexpr(unassign.string,Taxo.actual[j-1])>0,
+                                           Taxo.actual[j-1],paste(Taxo.actual[j-1],unassign.string,sep=""))}
+        }
+      }
+      
+      Taxo.actual.rbind<-do.call("rbind", replicate(length(sample_sums(actual.phylos)), Taxo.actual, simplify = FALSE))
+      colnames(Taxo.actual.rbind)<-colnames(tax_table(which.phyloseq))
+      Sd<-sample_data(actual.phylos)
+      TEMP<-data.frame(Abundance,OTU,Seq.tot,Taxo.actual.rbind,Sd,stringsAsFactors = F)
+      RESULT<-rbind(RESULT,TEMP)
+    }
+    RESULT
+}
+
+
+
+phyloseq_2_GG.v2<-function(which.taxa,which.phyloseq,manage.ussigned=NULL,unassign.string=NULL){  
+  RESULT<-data.frame(stringsAsFactors = F)
+  SSUMS<-sample_sums(which.phyloseq)
+  for(i in 1: length(which.taxa))
+    {
+      actual.phylos<-prune_taxa(taxa_names(which.phyloseq)%in%which.taxa[i],which.phyloseq)
+      Abundance<-as.numeric(otu_table(actual.phylos))  
+      OTU<-rep(which.taxa[i],length(Abundance))
+      Seq.tot<-SSUMS
+      Taxo.actual<-as.character(tax_table(actual.phylos))
+      if(manage.ussigned==T){
+        for(j in 2: length(Taxo.actual)){
+          if(is.na(Taxo.actual[j])){Taxo.actual[j]<-ifelse(regexpr(unassign.string,Taxo.actual[j-1])>0,
+                                           Taxo.actual[j-1],paste(Taxo.actual[j-1],unassign.string,sep=""))}
+        }
+      }
+      
+      Taxo.actual.rbind<-do.call("rbind", replicate(length(sample_sums(actual.phylos)), Taxo.actual, simplify = FALSE))
+      colnames(Taxo.actual.rbind)<-colnames(tax_table(which.phyloseq))
+      Sd<-sample_data(actual.phylos)
+      TEMP<-data.frame(Abundance,OTU,Seq.tot,Taxo.actual.rbind,Sd,stringsAsFactors = F)
+      RESULT<-rbind(RESULT,TEMP)
+    }
+    RESULT
+}
+
+
+#Otu table normalization for the purose of DESeq2 analyzes
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+set.seed(12345)
+```
+
+#Load phyloseq with diet profiles
+```{r}
+load("/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/data/Hirundo_DIET.R")
+Hirundo_DIET<-manage_unassigned(Hirundo_DIET,UNASS_STRING=NA,ADD="",AFTER=TRUE)
+```
+
+#Convert sample collection dates to Julian dates
+```{r}
+DATE<-as.character(sample_data(Hirundo_DIET)$Date_sample)
+DAY<- as.numeric(sapply(strsplit(DATE, "-"), `[`, 1, simplify=TRUE))
+MONTH<- sapply(strsplit(DATE, "-"), `[`, 2, simplify=TRUE)
+MONTH<- as.numeric(as.roman(MONTH))
+YEAR<- as.numeric(sapply(strsplit(DATE, "-"), `[`, 3, simplify=TRUE))
+
+mydates <- as.Date(paste(YEAR,MONTH,DAY,sep="-"))
+START<-as.Date("2014-01-01")
+
+JULIAN_DATE<-mydates-START
+JULIAN_DATE.c<-JULIAN_DATE-mean(JULIAN_DATE) #centered Julian dates
+
+sample_data(Hirundo_DIET)$JULIAN_DATE<-as.numeric(JULIAN_DATE) 
+sample_data(Hirundo_DIET)$JULIAN_DATE.c<-as.numeric(JULIAN_DATE.c) 
+```
+
+#Basic descriptive statistics for the whole dataset
+```{r}
+#number of individuals sequenced
+Hirundo_DIET
+length(unique(sample_data(Hirundo_DIET)$individual_ID))
+sum(otu_table(Hirundo_DIET))
+sum(taxa_sums(Hirundo_DIET)>0) #number of insects ASVs
+summary(sample_sums(Hirundo_DIET)) #sequencing coverage
+
+SD<-data.frame(sample_data(Hirundo_DIET))
+SD.unq<-SD[duplicated(SD$individual_ID)==F,]
+summary(SD.unq$Adult_vs_Young) #number of adults/juveniles sequenced
+
+```
+
+
+
+#Compare proportions of avian sequences in samples amplified with/without blocking primers
+
+```{r}
+FILTER<-as.logical(tax_table(Hirundo_DIET)[,3]!=" Aves",Hirundo_DIET)
+Hirundo_nonavian<-prune_taxa(FILTER,Hirundo_DIET)
+
+DF<-data.frame(ALL=sample_sums(Hirundo_DIET),
+               NONAVIAN=sample_sums(Hirundo_nonavian),
+               TYPE=sample_data(Hirundo_nonavian)$Blokacni_primery)
+DF$AVIAN=DF$ALL-DF$NONAVIAN
+summary(DF$TYPE)
+
+wilcox.test(DF$AVIAN~DF$TYPE)
+
+tapply(DF$AVIAN/DF$ALL,DF$TYPE,mean)
+tapply(DF$AVIAN/DF$ALL,DF$TYPE,se)
+```
+
+#Removing non-insect ASVs
+```{r}
+RELEVANT<-c(" Insecta")
+Hirundo_insects.all<-prune_taxa(tax_table(Hirundo_DIET)[,"Class"]%in%RELEVANT,Hirundo_DIET)
+NAMES<-sample_names(Hirundo_insects.all)
+NAMES<-gsub("_NIC","",NAMES)
+NAMES<-gsub("_VL_Trus_Pot","",NAMES)
+sample_data(Hirundo_insects.all)$ID_ind<-NAMES
+SD<-sample_data(Hirundo_insects.all)
+Hirundo_insects.all<-merge_samples(Hirundo_insects.all,"ID_ind")
+SD<-SD[duplicated(SD$ID_ind)==F,]
+sample_names(SD)<-SD$ID_ind
+sample_data(Hirundo_insects.all)<-SD
+Hirundo_insects.all
+# sort(sample_sums(Hirundo_insects.all))
+# sum(sample_sums(Hirundo_insects.all)<100)
+
+Hirundo_insects<-prune_samples(sample_sums(Hirundo_insects.all)>400,Hirundo_insects.all)
+save(Hirundo_insects,file = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/data/Hirundo_insects.R")
+
+Hirundo_insects.gen<-tax_glom(Hirundo_insects,'Genus',NArm = F) #dataset for statistical analyzes (samples with/without blocking primers merged)
+Hirundo_insects.all.gen<-tax_glom(Hirundo_insects.all,'Genus',NArm = F)
+```
+
+#Missing data analyzes: (Part 1) sources of PCR failures in diet data
+META_unq.txt represents list of all individuals included in the sequencing experiment
+
+```{r}
+META_unq<-read.delim("/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/data/META_unq.txt")
+dim(META_unq)
+summary(as.factor(META_unq$Adult_vs_Young))
+
+#PCR success: Individulas with/without sequencing data
+META_unq$IN_ANALYZES<-META_unq$individual_ID%in%sample_data(Hirundo_DIET)$individual_ID
+summary(META_unq$IN_ANALYZES)
+
+#No effect of Julian data on PCR success
+t.test(META_unq$JULIAN_DATE~META_unq$IN_ANALYZES) 
+
+#No effect of colony on PCR success
+chisq.test(META_unq$Locality,META_unq$IN_ANALYZES, correct=FALSE) 
+
+#Significantly higher PCR success in juveniles
+chisq.test(META_unq$Adult_vs_Young,META_unq$IN_ANALYZES, correct=FALSE) 
+tapply(META_unq$IN_ANALYZES,META_unq$Adult_vs_Young,sum)/tapply(META_unq$IN_ANALYZES,META_unq$Adult_vs_Young,length)
+```
+
+#Missing data analyzes - (Part 2) Comparission of microbiota in samples with successful/unsuccesful COI PCR amplification 
+META_unq contains all collected samples.
+
+```{r}
+load("/media/kreising/DATA/data/VLASTOVKY/PHYLOSEQ_rerun/HIRUNDO_16S.taxo.phylo.R")
+META_unq$NAMES<-gsub("_VL_Trus_Pot","",META_unq$NAMES)
+
+#subset of 16S rRNA samples that were including in the diet profiling study 
+HIRUNDO_16S.taxo.phylo_withDiet<-prune_samples(sample_names(HIRUNDO_16S.taxo.phylo)%in%META_unq$NAMES, HIRUNDO_16S.taxo.phylo)
+SD<-data.frame(sample_data(HIRUNDO_16S.taxo.phylo_withDiet))
+SD$sample_ID<-sample_names(HIRUNDO_16S.taxo.phylo_withDiet)
+ADD<-data.frame(sample_ID=META_unq$NAMES,
+                IN_ANALYZES=META_unq$IN_ANALYZES,
+                LOKALITA=META_unq$Locality)
+
+SD<-join(SD,ADD)
+
+#Samples with higher DNA concentriation (assessed based on intensities of 16s PCR products) had higher COI amplification success
+t.test(SD$PCR_concentration ~SD$Adult_Young)
+
+#PERMANOVA for Hellinger and weighted UniFrac dissimilarities
+#no effect of PCR success with diet primers on microbiota composition
+HIRUNDO_16S.taxo.phylo_withDiet.trans<-transform_sample_counts(HIRUNDO_16S.taxo.phylo_withDiet,function(x) x/sum(x))
+HE<-(dist(decostand(otu_table(HIRUNDO_16S.taxo.phylo_withDiet.trans),"hell")))
+WU<-UniFrac(HIRUNDO_16S.taxo.phylo_withDiet.trans,weighted = TRUE,parallel = T)
+adonis2(HE~SD$Adult_Young+SD$IN_ANALYZES,by = "margin")
+adonis2(WU~SD$Adult_Young+SD$IN_ANALYZES,by = "margin") 
+```
+
+
+#Missing data analyzes - (Part 3) COI profile variation between samples with high vs. low number of Insects reads
+
+```{r}
+META_unq.SUB<-META_unq[META_unq$IN_ANALYZES==T,]
+META_unq.SUB$IN_ANALYZES<-META_unq.SUB$individual_ID%in%sample_data(Hirundo_insects)$individual_ID
+summary(META_unq.SUB$IN_ANALYZES) 
+
+#No effect of julian data
+t.test(META_unq.SUB$JULIAN_DATE~META_unq.SUB$IN_ANALYZES) #JULIAN DATA
+
+#No effect of age (i.e. adults vs. juveniles)
+chisq.test(META_unq.SUB$Adult_vs_Young,META_unq.SUB$IN_ANALYZES, correct=FALSE) #DOSPELI VS MLADATA
+
+#Significnat effect of locality
+chisq.test(META_unq.SUB$Locality,META_unq.SUB$IN_ANALYZES, correct=FALSE) #LOKALITA
+table(META_unq.SUB$Locality,META_unq.SUB$IN_ANALYZES)
+tapply(META_unq.SUB$IN_ANALYZES,META_unq.SUB$Locality,sum)/tapply(META_unq.SUB$IN_ANALYZES,META_unq.SUB$Locality,length)
+
+#But no difference in sample quality among localities
+t.test(META_unq.SUB$Kvalita_vzorku~META_unq.SUB$Locality) 
+
+#There was also no difference in composition beteween samples with low vs. high number of Insecta reads  
+Hirundo_insects.nonnull<-prune_samples(sample_sums(Hirundo_insects.all)>0,Hirundo_insects.all)
+Hirundo_insects.nonnull.trans<-transform_sample_counts(Hirundo_insects.nonnull,function(x) x/sum(x))
+SD<-data.frame(sample_data(Hirundo_insects.nonnull.trans))
+SD$Insect_high<-sample_sums(Hirundo_insects.nonnull)>400
+HE<-(dist(decostand(otu_table(Hirundo_insects.nonnull.trans),"hell")))
+adonis2(HE~SD$Locality+SD$Insect_high,by = "margin")
+
+```
+
+#5.d. Missing data analyzes - (Part 4) microbiota variation between samples with high vs. low number of Insects reads
+
+```{r}
+#TED POROVNANI VZORKU, CO MELI/NEMELI MALO SEKVENCI
+HIRUNDO_16S.taxo.phylo.sub<-prune_samples(sample_names(HIRUNDO_16S.taxo.phylo)%in%META_unq.SUB$NAMES, HIRUNDO_16S.taxo.phylo)
+
+SD<-data.frame(sample_data(HIRUNDO_16S.taxo.phylo.sub))
+SD$sample_ID_bact<-sample_names(HIRUNDO_16S.taxo.phylo.sub)
+ADD<-data.frame(sample_ID_bact=META_unq.SUB$NAMES,
+                    IN_ANALYZES=META_unq.SUB$IN_ANALYZES,
+                LOKALITA=META_unq.SUB$Locality)
+
+SD<-join(SD,ADD)
+
+
+#No difference in microbiota composition between samples with low vs. high number of reads
+HIRUNDO_16S.taxo.phylo.sub.trans<-transform_sample_counts(HIRUNDO_16S.taxo.phylo.sub,function(x) x/sum(x))
+HE<-(dist(decostand(otu_table(HIRUNDO_16S.taxo.phylo.sub.trans),"hell")))
+WU<-UniFrac(HIRUNDO_16S.taxo.phylo.sub.trans,weighted=T)
+adonis2(HE~SD$LOKALITA+SD$IN_ANALYZES,by = "margin")
+adonis2(WU~SD$LOKALITA+SD$IN_ANALYZES,by = "margin") 
+
+```
+
+#Consistence in composition of COI profiles between samples amplified with or whithout blocking primer
+
+```{r}
+
+#Prepare data subset, i.e. just "Insecta" reads and at least 400 sequences per sample
+RELEVANT<-c(" Insecta")
+Hirundo_DIET_relevant<-prune_taxa(tax_table(Hirundo_DIET)[,"Class"]%in%RELEVANT,Hirundo_DIET)
+Hirundo_DIET_relevant<-prune_samples(sample_sums(Hirundo_DIET_relevant)>400,Hirundo_DIET_relevant)
+
+summary(sample_data(Hirundo_DIET)$Blokacni_primery)
+summary(sample_data(Hirundo_DIET_relevant)$Blokacni_primery)
+
+#A subset of individuals that were amplified both with and without blocking primers
+DUPL.samples.H<-sample_data(Hirundo_DIET_relevant)$sample_ID[duplicated(sample_data(Hirundo_DIET_relevant)$sample_ID)==T]
+Hirundo_DIET_relevant<-prune_samples(sample_data(Hirundo_DIET_relevant)$sample_ID%in%DUPL.samples.H==T, Hirundo_DIET_relevant)
+Hirundo_DIET_relevant<-prune_taxa(taxa_sums(Hirundo_DIET_relevant)>0,Hirundo_DIET_relevant)
+Hirundo_DIET_relevant
+
+#Subset of sample amplified with (dupl.1) and without (dupl.2) blocking primers
+dupl.1<-prune_samples(sample_data(Hirundo_DIET_relevant)$Blokacni_primery=="Hirundo",
+                      Hirundo_DIET_relevant)
+dupl.2<-prune_samples(sample_data(Hirundo_DIET_relevant)$Blokacni_primery=="NIC",
+                      Hirundo_DIET_relevant)
+
+#################################
+#Aplha diversity#################
+#################################
+
+#kontrola konzistence diverzity
+DIV1<-estimate_richness(rarefy_even_depth(dupl.1),measures = c("Observed","Shannon"))
+DIV2<-estimate_richness(rarefy_even_depth(dupl.2),measures = c("Observed","Shannon"))
+
+DIV1<-data.frame(DIV1,sample_data(dupl.2))
+DIV2<-data.frame(DIV2,sample_data(dupl.2))
+
+IND<-sample_data(dupl.1)$sample_ID
+ 
+DIV1<-DIV1[match(IND, DIV1$sample_ID),]
+DIV2<-DIV2[match(IND, DIV2$sample_ID),]
+ 
+cor.test(DIV1$Shannon,DIV2$Shannon)
+
+Df.div<-data.frame(DIV=c(DIV1$Shannon,DIV2$Shannon),
+                   IND=rep(1:dim(DIV1)[1],2))
+
+
+#repeatability 
+rep1 <- rpt(DIV ~ (1 | IND), grname = "IND", data = Df.div, 
+    datatype = "Gaussian", nboot = 1000, npermut = 0)
+rep0 <- rpt(DIV ~ (1 | IND), grname = "IND", data = Df.div, 
+    datatype = "Gaussian", nboot = 0, npermut = 1000)
+
+print(rep1)
+print(rep0)
+
+#Ggplot for consistence in diversity
+DD<-data.frame(DIV1$Shannon,DIV2$Shannon)
+CON_DIV_blok<-ggplot(data=DD,aes(x=DIV1.Shannon, y=DIV2.Shannon,label=""))+
+  geom_point(alpha=0.5)+theme_bw()
+CON_DIV_blok<-CON_DIV_blok+geom_smooth(method = "lm",color="black")+ggtitle("A) Consistency in diversity")+
+                                       xlab("Shannon (blocking primers)")+ylab("Shannon (no blocking primers)")
+
+###########################################
+#CONSISTENCE IN BETA DIVERSITY#############
+###########################################
+
+HE1<-as.matrix(dist(decostand(otu_table(dupl.1),"hell")))
+HE2<-as.matrix(dist(decostand(otu_table(dupl.2),"hell")))
+
+rownames(HE1)<-colnames(HE1)<-sample_data(dupl.1)$sample_ID
+rownames(HE2)<-colnames(HE2)<-sample_data(dupl.2)$sample_ID
+
+HE2<-HE2[rownames(HE1),rownames(HE1)]
+
+HE1.pcoa<-pcoa(as.dist(HE1),correction = "cailliez")$vectors
+HE2.pcoa<-pcoa(as.dist(HE2),correction = "cailliez")$vectors
+
+PROTEST<-protest(HE1.pcoa,HE2.pcoa)
+PROTEST
+
+DD<-data.frame(PROTEST$Yrot[,1:2],PROTEST$X[,1:2])
+names(DD)
+DD$species<-rownames(DD)
+
+#Ggplot for Procrustes superimposition
+CON_COM_blok<-ggplot(data=DD,aes(x=Axis.1, y=Axis.2,label=""))+
+  geom_point(alpha=0.5)+geom_segment(aes(x=Axis.1, y=Axis.2, xend=X1, yend=X2), size = 0.7,
+                                     arrow = arrow(length = unit(0.1, "cm")),alpha=0.5)+geom_text()
+CON_COM_blok<-CON_COM_blok+theme_bw()
+CON_COM_blok<-CON_COM_blok+ggtitle("B) Consistency in composition")+
+                                       xlab("Axis 1")+ylab("Axis 2")
+
+MULTI<-ggarrange(CON_DIV_blok,CON_COM_blok,ncol = 1)
+ggsave(MULTI,filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Consistency.pdf", width = 8, height = 12, units= "cm")
+
+ggsave(MULTI,filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Consistency.tiff", width = 8, height = 12, units= "cm",dpi=400)
+
+```
+
+
+#Barplots - genus-level taxa
+
+```{r}
+#Colour palette with 25 colours
+P25<-createPalette(25, c("#010101", "#ff0000"), M=1000)
+names(P25)<-NULL
+P25<-P25[c(25,2:24,1)]
+
+#24 most abundant genera
+Hirundo_insects.gen.trans<-transform_sample_counts(Hirundo_insects.gen,function(x) x/sum(x))
+ta7.prop = tapply(taxa_sums(Hirundo_insects.gen.trans), tax_table(Hirundo_insects.gen.trans)[, "Genus"], sum, na.rm = TRUE)/dim(otu_table(Hirundo_insects.gen.trans))[1]
+# rev(sort(ta7.prop)) 
+top8phyla = names(sort(ta7.prop, TRUE))[1:24]
+
+#Low-abundance taxa are flagged as "others"
+TAXO<-(tax_table(Hirundo_insects.gen.trans)[,6])
+TAXO[!TAXO %in% c(top8phyla)] <- "others"
+tax_table(Hirundo_insects.gen.trans)[,6]<-as.character(TAXO)
+
+#Phyloseq to long format data.frame()
+mdf = psmelt(Hirundo_insects.gen.trans)
+mdf$Genus<-factor(mdf$Genus, levels = c(top8phyla,"others"))
+mdf$Locality<-gsub("Kotrba","A) Hamr farm",mdf$Locality)
+mdf$Locality<-gsub("Pulec_Kraus","B) Saloun farm",mdf$Locality)
+mdf$ID.fin<-paste(mdf$individual_ID,sep="_")
+mdf <- mdf[order(mdf$JULIAN_DATE),] 
+
+#sort genera by abundance
+SORT.vect<-rev(sort(tapply(mdf$Abundance, mdf$Genus, sum)))
+SORT.vect.others<-SORT.vect[grep("others",names(SORT.vect))]
+SORT.vect.rest<-SORT.vect[-grep("others",names(SORT.vect))]
+SORT.vect<-c(SORT.vect.rest,SORT.vect.others)
+
+#ggplot barplots
+ta3 = ggplot(mdf, aes_string(x = "ID.fin", y = "Abundance", fill = "Genus",order="Genus"))+theme_bw(base_size = 12)
+ta3 = ta3 + geom_bar(stat = "identity", position = "stack")
+ta3= ta3 + theme(axis.title.x=element_blank(),axis.text.x = element_text(size = 7, angle = 90),axis.text.y = element_text(hjust = 0,size=10))
+
+ta3 <- ta3 + facet_nested(. ~Locality +Adult_vs_Young, scales = "free",space="free")+theme(strip.text = element_text(size = 10, angle = 0))+ scale_fill_manual(values = P25)
+
+ta3<-ta3+theme(legend.position="bottom",
+               legend.text=element_text(size=8), 
+               axis.ticks.x = element_blank(), 
+               strip.text.x = element_text(size = 8))
+
+ggsave(ta3,
+       filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Barplot_genus.pdf",
+       width = 18, height = 12, units = "cm")
+
+ta3
+```
+
+#Alpha diversity - rarefaction curves
+
+```{r message=FALSE}
+#Data frame for alpha diversity analyzes
+RICH<-estimate_richness(rarefy_even_depth(Hirundo_insects.gen),
+                        measures = c("Observed","Shannon"))
+RICH<-data.frame(RICH,sample_data(Hirundo_insects.gen))
+RICH$seq.sums<-sample_sums(Hirundo_insects.gen)
+
+#Per sample average proporions of insects genera:
+summary(RICH$Observed)
+se(RICH$Observed)
+
+#Rarefaction curves
+rarefaction_curve_data <- calculate_rarefaction_curves(Hirundo_insects.gen, c('Observed'), rep(seq(1,5001,by=200), each = 100))
+
+rarefaction_curve_data_summary <- ddply(rarefaction_curve_data, c('Depth', 'Sample', 'Measure'), summarise, Alpha_diversity_mean = mean(Alpha_diversity), Alpha_diversity_sd = sd(Alpha_diversity))
+
+rarefaction_curve_data_summary_verbose <- merge(rarefaction_curve_data_summary, data.frame(sample_data(Hirundo_insects.gen.trans)), by.x = 'Sample', by.y = 'row.names')
+
+# head(rarefaction_curve_data_summary_verbose)
+RARE.plot<-ggplot(data = rarefaction_curve_data_summary_verbose,
+                  mapping = aes(x = Depth,
+                        y = Alpha_diversity_mean,
+                        ymin = Alpha_diversity_mean - Alpha_diversity_sd,
+                        ymax = Alpha_diversity_mean + Alpha_diversity_sd,
+                        group = individual_ID)) + 
+                        geom_line(alpha=0.3)
+
+RARE.plot<-RARE.plot+xlab("Number of sequences")+ylab("Number of insect genera")+theme_bw()
+
+ggsave(RARE.plot,
+       filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Rarefaction_NEW.pdf",
+       width = 8, height = 8, units= "cm",device = cairo_pdf)
+
+RARE.plot
+```
+
+#Alpha diversity - ANCOVA analyzes
+**models were selected using backward step-wise elimination of nonsignificant terms**
+```{r}
+#Julian date of sample collection did not varied between colonies
+t.test(RICH$JULIAN_DATE~RICH$Locality)
+
+#ANCOVA - alpha diversity variation
+model1<-lm(Shannon^0.5~log(seq.sums)+Locality+Adult_vs_Young+JULIAN_DATE+
+             Locality:Adult_vs_Young+Locality:JULIAN_DATE+
+             Adult_vs_Young:JULIAN_DATE,data=RICH)
+
+model2<-lm(Shannon^0.5~log(seq.sums)+Locality+Adult_vs_Young+JULIAN_DATE+
+             Locality:Adult_vs_Young+Locality:JULIAN_DATE,data=RICH)
+
+model3<-lm(Shannon^0.5~log(seq.sums)+Locality+Adult_vs_Young+JULIAN_DATE
+             +Locality:JULIAN_DATE,data=RICH)
+
+model4<-lm(Shannon^0.5~log(seq.sums)+Locality+Adult_vs_Young+JULIAN_DATE
+             ,data=RICH)
+
+model5<-lm(Shannon^0.5~log(seq.sums)+Locality+JULIAN_DATE
+             ,data=RICH)
+
+model6<-lm(Shannon^0.5~log(seq.sums)+Locality
+             ,data=RICH)
+
+model7<-lm(Shannon^0.5~Locality
+             ,data=RICH)
+
+model8<-lm(Shannon^0.5~1
+             ,data=RICH)
+
+anova(model1,model2) #No effect of age x Julian date interaction
+anova(model3,model2) #No effect of age x locality interaction
+anova(model3,model4) #No effect of locality x Julian date interaction
+anova(model5,model4) #No effect of Age
+anova(model5,model6) #No effect of Julian date
+anova(model7,model6) #marginally significant diversity increase with sequencing depth
+anova(model7,model8) #significant variation among localities
+
+#summary of minimal adequate model
+summary(model7)
+
+#boxplot - variation between localities
+levels(RICH$Locality)<-c("A) Hamr farm","B) Saloun farm")
+DIV.plot<-ggplot(data = RICH, aes(y=Shannon^0.5,x=Locality))+geom_boxplot()+geom_jitter()+theme_bw()
+DIV.plot<-DIV.plot+xlab("")+ylab("Shannon (sqrt. transf.)")+ labs(shape='') 
+
+ggsave(DIV.plot,
+       filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Diversity.pdf", 
+       width = 12, height = 8, units= "cm")
+
+DIV.plot
+
+#Alpha diversity variation between adults vs. juveniles
+tapply(RICH$Shannon, RICH$Adult_vs_Young, mean)
+tapply(RICH$Shannon, RICH$Adult_vs_Young, se)
+```
+
+#Effect of rarefaction on beta diversity
+We selected a subset of samples with > 5000 insect reads. In the next step, we rarefied this subset to 500 and 5000 sequences and compared betadiversity for these two rarefaction tresholds by Procrustes analysis
+```{r}
+Hirundo_insects.gen.5000<-prune_samples(sample_sums(Hirundo_insects.gen)>5000,Hirundo_insects.gen)
+Hirundo_insects.gen.5000
+
+Hirundo_insects.gen.5000_A<-rarefy_even_depth(Hirundo_insects.gen.5000,sample.size = 5000)
+Hirundo_insects.gen.5000_B<-rarefy_even_depth(Hirundo_insects.gen.5000,sample.size = 500)
+
+JA_A<-vegdist(data.frame(otu_table(Hirundo_insects.gen.5000_A)),method="jaccard",binary=T)
+JA_B<-vegdist(data.frame(otu_table(Hirundo_insects.gen.5000_B)),method="jaccard",binary=T)
+
+JA_A.pcoa<-pcoa(JA_A)
+JA_B.pcoa<-pcoa(JA_B)
+PROTEST<-protest(JA_A.pcoa$vectors,JA_B.pcoa$vectors)
+PROTEST
+
+```
+
+#Principal Coordinate Analysis (PCoA)
+
+```{r}
+
+#Calculate dissimilarities among samples
+he<-(dist(decostand(otu_table(Hirundo_insects.gen),"hell")))
+Hirundo_insects.gen.rare<-rarefy_even_depth(Hirundo_insects.gen)
+ja<-vegdist(data.frame(otu_table(Hirundo_insects.gen)),method="jaccard",binary=T)
+
+Locality <- c(Kotrba = "A) Hamr farm",
+              Pulec_Kraus = "B) Saloun farm")
+Locality_labeller <- function(variable,value){
+  return(Locality[value])
+}
+
+#Sample ordination plot - Jaccard dissimilarities
+ord<-ordinate(Hirundo_insects.gen,method = "PCoA",distance = ja)
+ord.ja<-ord
+ordi<-plot_ordination(Hirundo_insects.gen,ord,color = "JULIAN_DATE",shape="Adult_vs_Young",
+      axes=c(1,2))+theme_bw()+facet_grid(.~Locality,, labeller=Locality_labeller)+scale_color_gradient(low = "gray80",high = "black")
+
+ordi.ja<-ordi
+
+ordi.ja$labels$colour<-"Julian date"
+ordi.ja$labels$shape<-"Age"
+
+#Sample ordination plot - Hellinger dissimilarities
+ord<-ordinate(Hirundo_insects.gen,method = "PCoA",distance = he)
+ord.he<-ord
+ordi<-plot_ordination(Hirundo_insects.gen,ord,color = "JULIAN_DATE",shape="Adult_vs_Young",
+      axes=c(1,2))+theme_bw()+facet_grid(.~Locality,, labeller=Locality_labeller)+scale_color_gradient(low = "gray80",high = "black")
+
+ordi.he<-ordi
+
+ordi.he$labels$colour<-"Julian date"
+ordi.he$labels$shape<-"Age"
+
+#Final plot for both Jaccard and Hellinger dissimilarities
+MULTI<-ggarrange(ordi.he+ggtitle("A) Hellinger"),ordi.ja+ggtitle("B) Jaccard"), ncol=1, nrow=2, common.legend = TRUE, legend="bottom")
+
+ggsave(MULTI,
+       filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/PCOA_ja_bc.pdf", width = 16, height = 16, units= "cm")
+MULTI
+```
+
+#Effect of Julian date and colony on PCoA axes scores
+
+```{r}
+#####################
+#Jaccard dist.   ####
+#####################
+#effect of location
+wilcox.test(ord.ja$vectors[,1]~sample_data(Hirundo_insects.gen)$Locality)
+wilcox.test(ord.ja$vectors[,2]~sample_data(Hirundo_insects.gen)$Locality)
+
+#effect of julian data
+cor.test(as.numeric(sample_data(Hirundo_insects.gen)$JULIAN_DATE),
+         ord.ja$vectors[,1],method = "spearman")
+
+cor.test(as.numeric(sample_data(Hirundo_insects.gen)$JULIAN_DATE),
+         ord.ja$vectors[,2],method = "spearman")
+
+######################
+#Hellinger dist.   ###
+######################
+
+#effect of location
+wilcox.test(ord.he$vectors[,1]~sample_data(Hirundo_insects.gen)$Locality)
+wilcox.test(ord.he$vectors[,2]~sample_data(Hirundo_insects.gen)$Locality)
+
+
+#effect of julian data
+cor.test(as.numeric(sample_data(Hirundo_insects.gen)$JULIAN_DATE),
+         ord.he$vectors[,1],method = "spearman")
+cor.test(as.numeric(sample_data(Hirundo_insects.gen)$JULIAN_DATE),
+         ord.he$vectors[,2],method = "spearman")
+```
+
+#Distance-based Redundancy Analyses (db-RDA)
+-alterantive appoarch for analyzes on diet variation
+```{r message=FALSE}
+#PCoA-scaled Jaccard and Hellinger dissimilarities (will be used as RDA response matrix) 
+he<-(dist(decostand(otu_table(Hirundo_insects.gen),"hell")))
+he<-pcoa(he)$vectors
+
+Hirundo_insects.gen.rare<-rarefy_even_depth(Hirundo_insects.gen)
+ja<-pcoa(vegdist(data.frame(otu_table(Hirundo_insects.gen.rare)),method="jaccard",binary=T))$vectors
+
+#data.frame with explanatory variables
+#polynomes for Julian date calculated bases on centered values to avoid multicollinearity
+DF<-sample_data(Hirundo_insects.gen)
+POLY<-poly(DF$JULIAN_DATE.c,3)
+colnames(POLY)<-c("jd1","jd2","jd3")
+DF<-data.frame(DF,POLY)
+
+#############################
+#Hellinger - model selection#
+#############################
+rda.vasc.0 <- rda (he ~ 1,data = DF) # model containing only the intercept
+rda.vasc.all <- rda (he ~ Locality+Adult_vs_Young+jd1+jd2+jd3, data = DF) # model including all explanatory variables 
+
+
+sel.osR2 <- ordistep(rda.vasc.0, scope = formula(rda.vasc.all),direction = "forward")
+AOV.BC<-anova(sel.osR2,by="margin")
+
+###########################
+#Jaccard - model selection#
+###########################
+rda.vasc.0 <- rda (ja ~ 1,data = DF) # model containing only species matrix and intercept
+rda.vasc.all <- rda (ja ~ Locality+Adult_vs_Young+jd1+jd2+jd3, data = DF) # model including all explanatory variables
+
+sel.osR2 <- ordistep (rda.vasc.0, scope = formula(rda.vasc.all), direction = 'forward')
+AOV.JA<-anova(sel.osR2,by="margin")
+
+#Table with selected models
+DF.ordi<-rbind(data.frame(AOV.BC),
+               data.frame(AOV.JA))
+
+DF.ordi<-data.frame(Dissimilarity=c("Bray-Curtis", "","","","",
+                                    "Jaccard", "","","",""),
+                    Predictor=rownames(DF.ordi),
+                    DF.ordi)
+DF.ordi$Predictor<-gsub("jd","Julian data^",DF.ordi$Predictor)
+
+write.table(DF.ordi,"/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/RDA_ordi.txt",
+            row.names = F,quote = F,sep="\t")
+DF.ordi
+```
+
+#DESeq2: Differential abundance analyzes
+only genera detected in at least 5 samples and exhibiting > 2 log2fold change considered as significant
+```{r message=FALSE}
+N.samples<-taxa_sums(transform_sample_counts(Hirundo_insects.gen, function(x) ifelse(x>0,1,0)))
+KEEP<-names(N.samples)[N.samples>4]
+
+#cubic polynome -NO EFFECT
+diagdds = phyloseq_to_deseq2(Hirundo_insects.gen, ~ Locality+poly(JULIAN_DATE,3))
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, test="LRT", fitType="local",reduced = ~Locality+poly(JULIAN_DATE,2))
+res=results(diagdds,cooksCutoff=T)
+alpha = 0.05
+sigtab = res[which(res$padj < alpha), ]
+dim(sigtab)
+res_cubic<-res
+
+#quadratic effect!!!!!
+diagdds = phyloseq_to_deseq2(Hirundo_insects.gen, ~ Locality+poly(JULIAN_DATE,2))
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, test="LRT", fitType="local",reduced = ~Locality+JULIAN_DATE)
+res=results(diagdds,cooksCutoff=T)
+# res$pvalue
+alpha = 0.05
+sigtab = res[which(res$padj < alpha), ]
+dim(sigtab)
+sigtab.QUADR<-sigtab
+sigtab.QUADR=sigtab.QUADR[rownames(sigtab.QUADR)%in%KEEP,]
+sigtab.QUADR=sigtab.QUADR[abs(sigtab.QUADR$log2FoldChange)>2,]
+res_quadratic<-res
+
+#linear effect - NO EFFECT
+diagdds = phyloseq_to_deseq2(Hirundo_insects.gen, ~ Locality+JULIAN_DATE)
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, test="LRT", fitType="parametric",reduced = ~Locality)
+res=results(diagdds,cooksCutoff=T)
+# res$pvalue
+alpha = 0.05
+sigtab = res[which(res$padj < alpha), ]
+dim(sigtab)
+res_linear<-res
+
+#locality - 6 NONSIGNIFICANT OTUS
+diagdds = phyloseq_to_deseq2(Hirundo_insects.gen, ~ poly(JULIAN_DATE,2)+Locality)
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, test="LRT", fitType="parametric",reduced = ~poly(JULIAN_DATE,2))
+res=results(diagdds,cooksCutoff=T)
+# res$pvalue
+# alpha = 0.05
+sigtab = res[which(res$padj < alpha), ]
+non.sigtab<-res[which(res$pvalue < alpha), ]
+non.sigtab=non.sigtab[rownames(non.sigtab)%in%KEEP,]
+res_locality<-res
+
+###############################
+##Table with all DESEQ results#
+###############################
+
+names(res_cubic)<-paste(names(res_cubic),"date.cubic",sep="_")
+names(res_quadratic)<-paste(names(res_quadratic),"date.quadratic",sep="_")
+names(res_linear)<-paste(names(res_linear),"date.linear",sep="_")
+names(res_locality)<-paste(names(res_locality),"Locality",sep="_")
+
+taxa_names(Hirundo_insects.gen)==rownames(res_cubic)
+
+DESEQ_df<-data.frame(res_cubic[,-1],res_quadratic[,-1],
+                     res_linear[,-1],res_locality[,-1],
+                     tax_table(Hirundo_insects.gen)[,3:6])
+head(DESEQ_df)
+
+write.table(DESEQ_df,file = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/DESEQ.table.txt",
+            sep="\t",)
+
+```
+
+#Plots for DESEq results 
+Prediction are based on glm for data with negative binomial distribution (fitted by glmmTMB package)
+(only quadratic effect of Julian date considered, other predictors non-significant)
+```{r message=FALSE,fig.height=20,fig.width=15}
+#EFFECT OF JUL DATE (LOCAL REGRESSION)
+DD<-phyloseq_2_GG.v2(which.taxa=rownames(sigtab.QUADR),
+              which.phyloseq=Hirundo_insects.gen,
+              manage.ussigned=T,
+              unassign.string="_unass.")
+
+DD$NAMES<-paste(DD$OTU,DD$Genus,sep="\n")
+DD$genus<-DD$Genus
+DD$genus<-gsub("_unass.","",DD$genus)
+DD$genus<-gsub(".unclassif","",DD$genus)
+
+levels(DD$Locality)<-c("A) Hamr farm","B) Saloun farm")
+
+
+library(glmmTMB)
+library(jtools)
+TAXA<-unique(DD$genus)
+i<-1
+plot_list<-list()
+model_list<-list()
+for(i in 1:length(TAXA)){
+   ACT<-DD[DD$genus==TAXA[i],]
+   ACT$JULIAN_DATE.q<-ACT$JULIAN_DATE^2
+   model<-glmmTMB(Abundance~Locality+poly(JULIAN_DATE,2),
+                  offset=log(Seq.tot),data=ACT,
+                  family = nbinom1,
+                  )
+   model_list[[i]]<-model
+   EFF<-effect_plot(model, pred = JULIAN_DATE, interval = TRUE,points=T)
+   EFF<-EFF+geom_point(data = ACT,
+                       aes(y=Abundance/Seq.tot,color=Locality,x=JULIAN_DATE),alpha=0.5)+
+             facet_grid(.~genus)
+   EFF<-EFF+theme_bw()+xlab("")+ylab("")+scale_y_sqrt()
+plot_list[[i]]<-EFF
+}
+
+GRID<-ggarrange(plotlist = plot_list,common.legend = T,legend = "bottom",
+                label.x="Julian date")
+
+
+ggsave(GRID,filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/DESEQ_neg_binom_pred.pdf", width = 18, height =20, units= "cm")
+GRID
+```
+#Procrustean analyses comparing pair-wise correlations betwenn microbiota and diet composition
+
+```{r}
+##################################################
+#Bacteria vs diet. Simple pair-wise correlations##
+##################################################
+
+load("/media/kreising/DATA/data/VLASTOVKY/PHYLOSEQ_rerun/HIRUNDO_16S.taxo.phylo.R") #phyloseq with microbial data
+load("/media/kreising/DATA/data/VLASTOVKY/PHYLOSEQ_rerun/HIRUNDO_picrust.R") #phyloseq with functional predictions
+load("/media/kreising/DATA/data/VLASTOVKY/PHYLOSEQ_rerun/HIRUNDO_picrust_path.R") #phyloseq with functional predictions categorized to pathways
+
+SN<-sample_data(Hirundo_insects.gen)$NAMES
+SN<-gsub("_NIC","",SN)
+SN<-gsub("_VL_Trus_Pot","",SN)
+sample_names(Hirundo_insects.gen)<-SN
+
+HIRUNDO_picrust<-prune_samples(sample_names(HIRUNDO_picrust)%in%SN,HIRUNDO_picrust)
+HIRUNDO_picrust_path<-prune_samples(sample_names(HIRUNDO_picrust_path)%in%SN,HIRUNDO_picrust_path)
+HIRUNDO_16S.taxo.phylo<-prune_samples(sample_names(HIRUNDO_16S.taxo.phylo)%in%SN,HIRUNDO_16S.taxo.phylo)
+summary(sample_sums(HIRUNDO_16S.taxo.phylo))
+
+#dissimilarities for picrust 
+He.pic<-as.matrix(dist(t(decostand(otu_table(HIRUNDO_picrust),"hell"))))
+He.pic.path<-as.matrix(dist(t(decostand(otu_table(HIRUNDO_picrust_path),"hell"))))
+
+#dissimilarities for bacterial data
+HIRUNDO_16S.taxo.phylo.rare<-rarefy_even_depth(HIRUNDO_16S.taxo.phylo)
+HIRUNDO_16S.taxo.phylo.prop<-transform_sample_counts(HIRUNDO_16S.taxo.phylo, function(x) x/sum(x))
+He.16S<-as.matrix(dist(decostand(otu_table(HIRUNDO_16S.taxo.phylo),"hell")))
+Ja.16S<-as.matrix(vegdist(data.frame(otu_table(HIRUNDO_16S.taxo.phylo.rare)),method="jaccard",binary=T))
+Wu.16S<-as.matrix(UniFrac(HIRUNDO_16S.taxo.phylo.prop, weighted = T))
+Uu.16S<-as.matrix(UniFrac(HIRUNDO_16S.taxo.phylo.rare, weighted = F))
+
+#dissimilarities for diet data
+He.COX<-as.matrix(dist(decostand(otu_table(Hirundo_insects.gen),"hell")))
+Hirundo_insects.gen.rare<-rarefy_even_depth(Hirundo_insects.gen)
+Ja.COX<-as.matrix(vegdist(data.frame(otu_table(Hirundo_insects.gen.rare)),method="jaccard",binary=T))
+
+#sort matrices
+He.pic<-He.pic[sort(rownames(He.pic)),sort(rownames(He.pic))]
+He.pic.path<-He.pic.path[sort(rownames(He.pic.path)),sort(rownames(He.pic.path))]
+He.16S<-He.16S[sort(rownames(He.16S)),sort(rownames(He.16S))]
+Ja.16S<-Ja.16S[sort(rownames(He.16S)),sort(rownames(He.16S))]
+Wu.16S<-Wu.16S[sort(rownames(He.16S)),sort(rownames(He.16S))]
+Uu.16S<-Uu.16S[sort(rownames(He.16S)),sort(rownames(He.16S))]
+He.COX<-He.COX[sort(rownames(He.COX)),sort(rownames(He.COX))]
+Ja.COX<-Ja.COX[sort(rownames(He.COX)),sort(rownames(He.COX))]
+
+#Procrustean superimposition: Absence/presence dissimilarities
+PROTEST<-protest(pcoa(Ja.16S,correction = "cailliez")$vectors,pcoa(Ja.COX,correction = "cailliez")$vectors)
+PROTEST_Ja.16S_JA.COX<-PROTEST
+PROTEST<-protest(pcoa(Uu.16S,correction = "cailliez")$vectors,pcoa(Ja.COX,correction = "cailliez")$vectors)
+PROTEST_Uu.16S_JA.COX<-PROTEST
+
+#Procrustean superimposition: Proportional dissimilarities
+PROTEST<-protest(pcoa(He.16S,correction = "cailliez")$vectors,pcoa(He.COX,correction = "cailliez")$vectors)
+PROTEST_He.16S_He.COX<-PROTEST
+PROTEST<-protest(pcoa(Wu.16S,correction = "cailliez")$vectors,pcoa(He.COX,correction = "cailliez")$vectors)
+PROTEST_Wu.16S_He.COX<-PROTEST
+
+#Procrustean superimposition: Metagenome predictions
+#Bc.16S,Bc.COX
+PROTEST<-protest(pcoa(He.pic,correction = "cailliez")$vectors,pcoa(He.COX,correction = "cailliez")$vectors)
+PROTEST_He.pic_He.COX<-PROTEST
+PROTEST<-protest(pcoa(He.pic,correction = "cailliez")$vectors,pcoa(Ja.COX,correction = "cailliez")$vectors)
+PROTEST_He.pic_Ja.COX<-PROTEST
+
+PROTEST<-protest(pcoa(He.pic.path,correction = "cailliez")$vectors,pcoa(He.COX,correction = "cailliez")$vectors)
+PROTEST_He.pic.path_He.COX<-PROTEST
+PROTEST<-protest(pcoa(He.pic.path,correction = "cailliez")$vectors,pcoa(Ja.COX,correction = "cailliez")$vectors)
+PROTEST_He.pic.path_Ja.COX<-PROTEST
+
+#Table summarizing results of Procrustean analyzes
+PROT.res.raw<-rbind(unlist(PROTEST_Ja.16S_JA.COX[c(3,6,13)]),
+                    unlist(PROTEST_Uu.16S_JA.COX[c(3,6,13)]),
+                    unlist(PROTEST_He.16S_He.COX[c(3,6,13)]),
+                    unlist(PROTEST_Wu.16S_He.COX[c(3,6,13)]),
+                    unlist(PROTEST_He.pic_He.COX[c(3,6,13)]),
+                    unlist(PROTEST_He.pic_Ja.COX[c(3,6,13)]),
+                    unlist(PROTEST_He.pic.path_He.COX[c(3,6,13)]),
+                    unlist(PROTEST_He.pic.path_Ja.COX[c(3,6,13)]))
+
+colnames(PROT.res.raw)<-c("Sum of squared differences","Procrustes correlation","p")
+PROT.res.raw<-data.frame(Type=c("Diet vs. Microbiota (absence/presence)","",
+                                "Diet vs. Microbiota (rel. abundance)","",
+                                "Diet vs. Metagenome predictions","","",""),
+                         Diet.dissimilarities=c("Jaccard","Jaccard","Hellinger","Hellinger",
+                                                "Hellinger","Jaccard","Hellinger","Jaccard"),
+                         Microbiota.dissimilarities=c("Jaccard","unw. UniFrac","Hellinger","w. UniFrac",
+                                                      "Hellinger (metagenome traits)",
+                                                      "Hellinger (metagenome traits)",
+                                                      "Hellinger (metagenome pathways)",
+                                                      "Hellinger (metagenome pathways)"),
+                         PROT.res.raw)
+
+
+write.table(PROT.res.raw,"/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Protest_table.txt",
+          row.names = F,quote = F,sep="\t")
+PROT.res.raw
+```
+
+#Proacrustean analysis: graphical outputs
+
+```{r}
+
+DD_Ja.16S_JA.COX<-data.frame(PROTEST_Ja.16S_JA.COX$Yrot[,1:2],PROTEST_Ja.16S_JA.COX$X[,1:2])
+DD_Uu.16S_JA.COX<-data.frame(PROTEST_Uu.16S_JA.COX$Yrot[,1:2],PROTEST_Uu.16S_JA.COX$X[,1:2])
+DD_He.16S_He.COX<-data.frame(PROTEST_He.16S_He.COX$Yrot[,1:2],PROTEST_He.16S_He.COX$X[,1:2])
+DD_Wu.16S_He.COX<-data.frame(PROTEST_Wu.16S_He.COX$Yrot[,1:2],PROTEST_Wu.16S_He.COX$X[,1:2])
+DD_He.pic_He.COX<-data.frame(PROTEST_He.pic_He.COX$Yrot[,1:2],PROTEST_He.pic_He.COX$X[,1:2])
+DD_He.pic_Ja.COX<-data.frame(PROTEST_He.pic_Ja.COX$Yrot[,1:2],PROTEST_He.pic_Ja.COX$X[,1:2])
+
+
+GG_Ja.16S_JA.COX<-ggplot(data=DD_Ja.16S_JA.COX,aes(x=Axis.1, y=Axis.2,label=""))+
+                  geom_point(alpha=0.5)+geom_segment(aes(x=Axis.1, y=Axis.2, xend=X1, yend=X2), size = 0.3,
+                                                     arrow = arrow(length = unit(0.2, "cm")),alpha=0.3)+
+                  geom_text()+theme_bw()
+
+GG_Uu.16S_JA.COX<-ggplot(data=DD_Uu.16S_JA.COX,aes(x=Axis.1, y=Axis.2,label=""))+
+                  geom_point(alpha=0.5)+geom_segment(aes(x=Axis.1, y=Axis.2, xend=X1, yend=X2), size = 0.3,
+                                                     arrow = arrow(length = unit(0.2, "cm")),alpha=0.3)+
+                  geom_text()+theme_bw()
+
+GG_He.16S_He.COX<-ggplot(data=DD_He.16S_He.COX,aes(x=Axis.1, y=Axis.2,label=""))+
+                  geom_point(alpha=0.5)+geom_segment(aes(x=Axis.1, y=Axis.2, xend=X1, yend=X2), size = 0.3,
+                                                     arrow = arrow(length = unit(0.2, "cm")),alpha=0.3)+
+                  geom_text()+theme_bw()
+
+GG_Wu.16S_He.COX<-ggplot(data=DD_Wu.16S_He.COX,aes(x=Axis.1, y=Axis.2,label=""))+
+                  geom_point(alpha=0.5)+geom_segment(aes(x=Axis.1, y=Axis.2, xend=X1, yend=X2), size = 0.3,
+                                                     arrow = arrow(length = unit(0.2, "cm")),alpha=0.3)+
+                  geom_text()+theme_bw()
+
+GG_He.pic_He.COX<-ggplot(data=DD_He.pic_He.COX,aes(x=Axis.1, y=Axis.2,label=""))+
+                  geom_point(alpha=0.5)+geom_segment(aes(x=Axis.1, y=Axis.2, xend=X1, yend=X2), size = 0.3,
+                                                     arrow = arrow(length = unit(0.2, "cm")),alpha=0.3)+
+                  geom_text()+theme_bw()
+
+GG_He.pic_Ja.COX<-ggplot(data=DD_He.pic_Ja.COX,aes(x=Axis.1, y=Axis.2,label=""))+
+                  geom_point(alpha=0.5)+geom_segment(aes(x=Axis.1, y=Axis.2, xend=X1, yend=X2), size = 0.3,
+                                                     arrow = arrow(length = unit(0.2, "cm")),alpha=0.3)+
+                  geom_text()+theme_bw()
+
+
+GG_Ja.16S_JA.COX<-GG_Ja.16S_JA.COX+ggtitle("A) Microbiota - Jaccard\n    Diet - Jaccard")+xlab("Axis 1")+ylab("Axis 2")+theme(plot.title = element_text(size = 8))
+GG_Uu.16S_JA.COX<-GG_Uu.16S_JA.COX+ggtitle("B) Microbiota - unweighted UniFrac\n    Diet - Jaccard")+xlab("Axis 1")+ylab("Axis 2")+theme(plot.title = element_text(size = 8))
+GG_He.16S_He.COX<-GG_He.16S_He.COX+ggtitle("C) Microbiota - Hellinger\n    Diet - Hellinger")+xlab("Axis 1")+ylab("Axis 2")+theme(plot.title = element_text(size = 8))
+GG_Wu.16S_He.COX<-GG_Wu.16S_He.COX+ggtitle("D) Microbiota - weighted UniFrac\n    Diet - Hellinger")+xlab("Axis 1")+ylab("Axis 2")+theme(plot.title = element_text(size = 8))
+GG_He.pic_He.COX<-GG_He.pic_He.COX+ggtitle("E) Metagenome pred. - Hellinger\n    Diet - Hellinger")+xlab("Axis 1")+ylab("Axis 2")+theme(plot.title = element_text(size = 8))
+GG_He.pic_Ja.COX<-GG_He.pic_Ja.COX+ggtitle("F) Metagenome pred. - Hellinger\n    Diet - Jaccard")+xlab("Axis 1")+ylab("Axis 2")+theme(plot.title = element_text(size = 8))
+
+GRID<-ggarrange(GG_Ja.16S_JA.COX,
+                GG_Uu.16S_JA.COX,
+                GG_He.16S_He.COX,
+                GG_Wu.16S_He.COX,
+                GG_He.pic_He.COX,
+                GG_He.pic_Ja.COX, ncol = 2,nrow = 3)
+
+ggsave(GRID,filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS//Diet_microbiota_PROTEST.pdf", 
+       width = 12, height = 20, units= "cm", device = cairo_pdf)
+
+GRID
+
+```
+
+
+#RDA/varpart analyzes 
+Effect of diet on microbiota after the statistical control for other environmental predictors
+
+
+```{r message=FALSE}
+
+He.pic.pc<-pcoa(He.pic,correction = "cailliez")
+He.pic.path.pc<-pcoa(He.pic.path,correction = "cailliez")
+He.16S.pc<-pcoa(He.16S,correction = "cailliez")
+Ja.16S.pc<-pcoa(Ja.16S,correction = "cailliez")
+Wu.16S.pc<-pcoa(Wu.16S,correction = "cailliez")
+Uu.16S.pc<-pcoa(Uu.16S,correction = "cailliez")
+He.COX.pc<-pcoa(He.COX,correction = "cailliez")
+Ja.COX.pc<-pcoa(Ja.COX,correction = "cailliez")
+
+He.pic.vect<-He.pic.pc$vectors
+He.pic.path.vect<-He.pic.path.pc$vectors
+He.16S.vect<-He.16S.pc$vectors
+Ja.16S.vect<-Ja.16S.pc$vectors
+Wu.16S.vect<-Wu.16S.pc$vectors
+Uu.16S.vect<-Uu.16S.pc$vectors
+He.COX.vect<-He.COX.pc$vectors
+Ja.COX.vect<-Ja.COX.pc$vectors
+
+#ECO TRAITS
+SD<-sample_data(Hirundo_insects.gen)
+POLY<-poly(as.numeric(SD$JULIAN_DATE.c),3)
+DAT.eco<-data.frame(JULIAN_DATE.1=POLY[,1],
+                    JULIAN_DATE.2=POLY[,2],
+                    JULIAN_DATE.3=POLY[,3],
+                    Adult=as.numeric(SD$Adult_vs_Young=="Adult"),
+                    Pulec_Kraus=as.numeric(SD$Locality=="Pulec_Kraus"))
+
+rownames(DAT.eco)<-sample_names(Hirundo_insects.gen)
+DAT.eco<-DAT.eco[match(rownames(He.COX.vect), rownames(DAT.eco)), ]
+
+#Convert diet PCoA matrices to data.frame()
+Ja.COX.vect.df<-data.frame(Ja.COX.vect)
+He.COX.vect.df<-data.frame(He.COX.vect)
+
+#####################################################
+##Rda/varpart ~ Microbiota - Jaccard, Diet - Jaccard#
+#####################################################
+PCoA<-Ja.COX.pc
+MICROBIOTA<-Ja.16S.vect
+DIET<-Ja.COX.vect.df
+rda.vasc.0 <- rda (MICROBIOTA ~ 1,data=DIET) 
+rda.vasc.all <- rda (MICROBIOTA ~.,data=DIET) 
+SEL <- ordistep(rda.vasc.0, scope = formula(rda.vasc.all),direction = "forward")
+KEEP<-attr(SEL$terms,"term.labels")
+DIET.sub<-DIET[,colnames(DIET)%in%KEEP]
+AXES<-PCoA$values
+rownames(AXES)[1:dim(PCoA$vectors)[2]]<-colnames(PCoA$vectors)
+AXES.sig<-AXES[rownames(AXES)%in%KEEP,colnames(AXES)%in%c("Eigenvalues","Relative_eig","Rel_corr_eig")]
+
+#var. part.
+VP<-varpart(MICROBIOTA,DIET.sub,DAT.eco)
+
+#test partitions
+RDA.ecology<-anova(rda(MICROBIOTA,as.matrix(DAT.eco),DIET.sub))
+RDA.diet<-anova(rda(MICROBIOTA,DIET.sub,as.matrix(DAT.eco)))
+
+#rename results
+VP_Ja.16S_JA.COX<-VP
+RDA.ecology_Ja.16S_JA.COX<-RDA.ecology
+RDA.diet_Ja.16S_JA.COX<-RDA.diet
+AXES.sig_Ja.16S_JA.COX<-AXES.sig
+##########################################################
+##Rda/varpart ~ Microbiota - unw. UniFrac, Diet - Jaccard#
+##########################################################
+PCoA<-Ja.COX.pc
+MICROBIOTA<-Uu.16S.vect
+DIET<-Ja.COX.vect.df
+rda.vasc.0 <- rda (MICROBIOTA ~ 1,data=DIET) 
+rda.vasc.all <- rda (MICROBIOTA ~.,data=DIET) 
+SEL <- ordistep(rda.vasc.0, scope = formula(rda.vasc.all),direction = "forward")
+KEEP<-attr(SEL$terms,"term.labels")
+DIET.sub<-DIET[,colnames(DIET)%in%KEEP]
+AXES<-PCoA$values
+rownames(AXES)[1:dim(PCoA$vectors)[2]]<-colnames(PCoA$vectors)
+AXES.sig<-AXES[rownames(AXES)%in%KEEP,colnames(AXES)%in%c("Eigenvalues","Relative_eig","Rel_corr_eig")]
+
+#var. part.
+VP<-varpart(MICROBIOTA,DIET.sub,DAT.eco)
+
+#test partitions
+RDA.ecology<-anova(rda(MICROBIOTA,as.matrix(DAT.eco),DIET.sub))
+RDA.diet<-anova(rda(MICROBIOTA,DIET.sub,as.matrix(DAT.eco)))
+
+#rename results
+VP_Uw.16S_JA.COX<-VP
+RDA.ecology_Uw.16S_JA.COX<-RDA.ecology
+RDA.diet_Uw.16S_JA.COX<-RDA.diet
+AXES.sig_Uw.16S_JA.COX<-AXES.sig
+#########################################################
+##Rda/varpart ~ Microbiota - Hellinger, Diet - Hellinger#
+#########################################################
+PCoA<-He.COX.pc
+MICROBIOTA<-He.16S.vect
+DIET<-He.COX.vect.df
+rda.vasc.0 <- rda (MICROBIOTA ~ 1,data=DIET) 
+rda.vasc.all <- rda (MICROBIOTA ~.,data=DIET) 
+SEL <- ordistep(rda.vasc.0, scope = formula(rda.vasc.all),direction = "forward")
+KEEP<-attr(SEL$terms,"term.labels")
+DIET.sub<-DIET[,colnames(DIET)%in%KEEP]
+AXES<-PCoA$values
+rownames(AXES)[1:dim(PCoA$vectors)[2]]<-colnames(PCoA$vectors)
+AXES.sig<-AXES[rownames(AXES)%in%KEEP,colnames(AXES)%in%c("Eigenvalues","Relative_eig","Rel_corr_eig")]
+
+#var. part.
+VP<-varpart(MICROBIOTA,DIET.sub,DAT.eco)
+
+#test partitions
+RDA.ecology<-anova(rda(MICROBIOTA,as.matrix(DAT.eco),DIET.sub))
+RDA.diet<-anova(rda(MICROBIOTA,DIET.sub,as.matrix(DAT.eco)))
+
+#rename results
+VP_He.16S_He.COX<-VP
+RDA.ecology_He.16S_He.COX<-RDA.ecology
+RDA.diet_He.16S_He.COX<-RDA.diet
+AXES.sig_He.16S_He.COX<-AXES.sig
+###########################################################
+##Rda/varpart ~ Microbiota - w. UniFrac, Diet - Hellinger#
+###########################################################
+PCoA<-He.COX.pc
+MICROBIOTA<-Wu.16S.vect
+DIET<-He.COX.vect.df
+rda.vasc.0 <- rda (MICROBIOTA ~ 1,data=DIET) 
+rda.vasc.all <- rda (MICROBIOTA ~.,data=DIET) 
+SEL <- ordistep(rda.vasc.0, scope = formula(rda.vasc.all),direction = "forward")
+KEEP<-attr(SEL$terms,"term.labels")
+DIET.sub<-DIET[,colnames(DIET)%in%KEEP]
+AXES<-PCoA$values
+rownames(AXES)[1:dim(PCoA$vectors)[2]]<-colnames(PCoA$vectors)
+AXES.sig<-AXES[rownames(AXES)%in%KEEP,colnames(AXES)%in%c("Eigenvalues","Relative_eig","Rel_corr_eig")]
+
+#var. part.
+VP<-varpart(MICROBIOTA,DIET.sub,DAT.eco)
+
+#test partitions
+RDA.ecology<-anova(rda(MICROBIOTA,as.matrix(DAT.eco),DIET.sub))
+RDA.diet<-anova(rda(MICROBIOTA,DIET.sub,as.matrix(DAT.eco)))
+
+#rename results
+VP_Wu.16S_He.COX<-VP
+RDA.ecology_Wu.16S_He.COX<-RDA.ecology
+RDA.diet_Wu.16S_He.COX<-RDA.diet
+AXES.sig_Wu.16S_He.COX<-AXES.sig
+#####################################################
+##Rda/varpart ~ Metagenome - Hellinger, Diet - Hellinger#
+#####################################################
+PCoA<-He.COX.pc
+MICROBIOTA<-He.pic.vect
+DIET<-He.COX.vect.df
+rda.vasc.0 <- rda (MICROBIOTA ~ 1,data=DIET) 
+rda.vasc.all <- rda (MICROBIOTA ~.,data=DIET) 
+SEL <- ordistep(rda.vasc.0, scope = formula(rda.vasc.all),direction = "forward")
+KEEP<-attr(SEL$terms,"term.labels")
+DIET.sub<-DIET[,colnames(DIET)%in%KEEP]
+AXES<-PCoA$values
+rownames(AXES)[1:dim(PCoA$vectors)[2]]<-colnames(PCoA$vectors)
+AXES.sig<-AXES[rownames(AXES)%in%KEEP,colnames(AXES)%in%c("Eigenvalues","Relative_eig","Rel_corr_eig")]
+
+#var. part.
+VP<-varpart(MICROBIOTA,DIET.sub,DAT.eco)
+
+#test partitions
+RDA.ecology<-anova(rda(MICROBIOTA,as.matrix(DAT.eco),DIET.sub))
+RDA.diet<-anova(rda(MICROBIOTA,DIET.sub,as.matrix(DAT.eco)))
+
+#rename results
+VP_He.pic_He.COX<-VP
+RDA.ecology_He.pic_He.COX<-RDA.ecology
+RDA.diet_He.pic_He.COX<-RDA.diet
+AXES.sig_He.pic_He.COX<-AXES.sig
+#####################################################
+##Rda/varpart ~ Metagenome - Hellinger, Diet - Jaccard#
+#####################################################
+PCoA<-Ja.COX.pc
+MICROBIOTA<-He.pic.vect
+DIET<-Ja.COX.vect.df
+rda.vasc.0 <- rda (MICROBIOTA ~ 1,data=DIET) 
+rda.vasc.all <- rda (MICROBIOTA ~.,data=DIET) 
+SEL <- ordistep(rda.vasc.0, scope = formula(rda.vasc.all),direction = "forward")
+KEEP<-attr(SEL$terms,"term.labels")
+DIET.sub<-DIET[,colnames(DIET)%in%KEEP]
+AXES<-PCoA$values
+rownames(AXES)[1:dim(PCoA$vectors)[2]]<-colnames(PCoA$vectors)
+AXES.sig<-AXES[rownames(AXES)%in%KEEP,colnames(AXES)%in%c("Eigenvalues","Relative_eig","Rel_corr_eig")]
+
+#var. part.
+VP<-varpart(MICROBIOTA,DIET.sub,DAT.eco)
+
+#test partitions
+RDA.ecology<-anova(rda(MICROBIOTA,as.matrix(DAT.eco),DIET.sub))
+RDA.diet<-anova(rda(MICROBIOTA,DIET.sub,as.matrix(DAT.eco)))
+
+#rename results
+VP_He.pic_JA.COX<-VP
+RDA.ecology_He.pic_JA.COX<-RDA.ecology
+RDA.diet_He.pic_JA.COX<-RDA.diet
+AXES.sig_He.pic_JA.COX<-AXES.sig
+#####################################################
+##Rda/varpart ~ Metagenome (path) - Hellinger, Diet - Hellinger#
+#####################################################
+PCoA<-He.COX.pc
+MICROBIOTA<-He.pic.path.vect
+DIET<-He.COX.vect.df
+rda.vasc.0 <- rda (MICROBIOTA ~ 1,data=DIET) 
+rda.vasc.all <- rda (MICROBIOTA ~.,data=DIET) 
+SEL <- ordistep(rda.vasc.0, scope = formula(rda.vasc.all),direction = "forward")
+KEEP<-attr(SEL$terms,"term.labels")
+DIET.sub<-DIET[,colnames(DIET)%in%KEEP]
+AXES<-PCoA$values
+rownames(AXES)[1:dim(PCoA$vectors)[2]]<-colnames(PCoA$vectors)
+AXES.sig<-AXES[rownames(AXES)%in%KEEP,colnames(AXES)%in%c("Eigenvalues","Relative_eig","Rel_corr_eig")]
+
+#var. part.
+VP<-varpart(MICROBIOTA,DIET.sub,DAT.eco)
+
+#test partitions
+RDA.ecology<-anova(rda(MICROBIOTA,as.matrix(DAT.eco),DIET.sub))
+RDA.diet<-anova(rda(MICROBIOTA,DIET.sub,as.matrix(DAT.eco)))
+
+#rename results
+VP_He.pic.path_He.COX<-VP
+RDA.ecology_He.pic.path_He.COX<-RDA.ecology
+RDA.diet_He.pic.path_He.COX<-RDA.diet
+AXES.sig_He.pic.path_He.COX<-AXES.sig
+#####################################################
+##Rda/varpart ~ Metagenome (path) - Hellinger, Diet - Jaccard#
+#####################################################
+PCoA<-Ja.COX.pc
+MICROBIOTA<-He.pic.path.vect
+DIET<-Ja.COX.vect.df
+rda.vasc.0 <- rda (MICROBIOTA ~ 1,data=DIET) 
+rda.vasc.all <- rda (MICROBIOTA ~.,data=DIET) 
+SEL <- ordistep(rda.vasc.0, scope = formula(rda.vasc.all),direction = "forward")
+KEEP<-attr(SEL$terms,"term.labels")
+DIET.sub<-DIET[,colnames(DIET)%in%KEEP]
+AXES<-PCoA$values
+rownames(AXES)[1:dim(PCoA$vectors)[2]]<-colnames(PCoA$vectors)
+AXES.sig<-AXES[rownames(AXES)%in%KEEP,colnames(AXES)%in%c("Eigenvalues","Relative_eig","Rel_corr_eig")]
+
+#var. part.
+VP<-varpart(MICROBIOTA,DIET.sub,DAT.eco)
+
+#test partitions
+RDA.ecology<-anova(rda(MICROBIOTA,as.matrix(DAT.eco),DIET.sub))
+RDA.diet<-anova(rda(MICROBIOTA,DIET.sub,as.matrix(DAT.eco)))
+
+#rename results
+VP_He.pic.path_JA.COX<-VP
+RDA.ecology_He.pic.path_JA.COX<-RDA.ecology
+RDA.diet_He.pic.path_JA.COX<-RDA.diet
+AXES.sig_He.pic.path_JA.COX<-AXES.sig
+
+#TABLE summarizing db-RDA/varpart results##############
+RSQADJ<-rbind(VP_Ja.16S_JA.COX$part$indfract$Adj.R.squared[c(1,3,2)],
+              VP_Uw.16S_JA.COX$part$indfract$Adj.R.squared[c(1,3,2)],
+              VP_He.16S_He.COX$part$indfract$Adj.R.squared[c(1,3,2)],
+              VP_Wu.16S_He.COX$part$indfract$Adj.R.squared[c(1,3,2)],
+              VP_He.pic_He.COX$part$indfract$Adj.R.squared[c(1,3,2)],
+              VP_He.pic_JA.COX$part$indfract$Adj.R.squared[c(1,3,2)],
+              VP_He.pic.path_He.COX$part$indfract$Adj.R.squared[c(1,3,2)],
+              VP_He.pic.path_JA.COX$part$indfract$Adj.R.squared[c(1,3,2)])
+
+NO_AXES<-rbind(VP_Ja.16S_JA.COX$part$indfract$Df[c(1,3)],
+              VP_Uw.16S_JA.COX$part$indfract$Df[c(1,3)],
+              VP_He.16S_He.COX$part$indfract$Df[c(1,3)],
+              VP_Wu.16S_He.COX$part$indfract$Df[c(1,3)],
+              VP_He.pic_He.COX$part$indfract$Df[c(1,3)],
+              VP_He.pic_JA.COX$part$indfract$Df[c(1,3)],
+              VP_He.pic.path_He.COX$part$indfract$Df[c(1,3)],
+              VP_He.pic.path_JA.COX$part$indfract$Df[c(1,3)])
+
+colnames(RSQADJ)<-c("Diet","Coveriates", "Both")
+colnames(NO_AXES)<-c("no. axes - diet","no. axes - covariates")
+
+
+VARPART.res<-data.frame(Diet.dissimilarities=c("Jaccard","Jaccard","Hellinger",
+                                                "Hellinger","Hellinger","Jaccard",
+                                                "Hellinger","Jaccard"),
+                         Microbiota.dissimilarities=c("Jaccard","unw. UniFrac","Hellinger",
+                                                      "w. UniFrac",
+                                                      "Hellinger (metagenome functions)",
+                                                      "Hellinger (metagenome functions)",
+                                                      "Hellinger (metagenome pathways)",
+                                                      "Hellinger (metagenome pathways)"),
+                         NO_AXES,RSQADJ)
+
+write.table(VARPART.res,file = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/VARPART.res.txt",sep="\t",quote = F, row.names = F)
+
+VARPART.res
+
+
+#PCoA axes for diet that significatnyl correlated with microbiota variation
+colnames(AXES.sig_Ja.16S_JA.COX)<-colnames(AXES.sig_Uw.16S_JA.COX)<-colnames(AXES.sig_He.16S_He.COX)<-
+colnames(AXES.sig_Wu.16S_He.COX)<-colnames(AXES.sig_He.pic_He.COX)<-colnames(AXES.sig_He.pic_JA.COX)<-
+colnames(AXES.sig_He.pic.path_He.COX)<-colnames(AXES.sig_He.pic.path_JA.COX)<-c("Eigenvalues","Relative_eig")
+
+DF.axes<-rbind(AXES.sig_Ja.16S_JA.COX,
+               AXES.sig_Uw.16S_JA.COX,
+               AXES.sig_He.16S_He.COX,
+               AXES.sig_Wu.16S_He.COX,
+               AXES.sig_He.pic_He.COX,
+               AXES.sig_He.pic_JA.COX,
+               AXES.sig_He.pic.path_He.COX,
+               AXES.sig_He.pic.path_JA.COX)
+
+Microbiota_dissimilarities<-c("Jaccard",rep("",dim(AXES.sig_Ja.16S_JA.COX)[1]-1),
+                              "unw. UniFrac",rep("",dim(AXES.sig_Uw.16S_JA.COX)[1]-1),
+                              "Hellinger",rep("",dim(AXES.sig_He.16S_He.COX)[1]-1),
+                              "w. UniFrac",rep("",dim(AXES.sig_Wu.16S_He.COX)[1]-1),
+                              "Hellinger",rep("",dim(AXES.sig_He.pic_He.COX)[1]-1),
+                              "Hellinger",rep("",dim(AXES.sig_He.pic_JA.COX)[1]-1),
+                              "Hellinger",rep("",dim(AXES.sig_He.pic.path_He.COX)[1]-1),
+                              "Hellinger",rep("",dim(AXES.sig_He.pic.path_JA.COX)[1]-1))
+
+Diet_dissimilarities<-c("Jaccard",rep("",dim(AXES.sig_Ja.16S_JA.COX)[1]-1),
+                              "Jaccard",rep("",dim(AXES.sig_Uw.16S_JA.COX)[1]-1),
+                              "Hellinger",rep("",dim(AXES.sig_He.16S_He.COX)[1]-1),
+                              "Hellinger",rep("",dim(AXES.sig_Wu.16S_He.COX)[1]-1),
+                              "Hellinger",rep("",dim(AXES.sig_He.pic_He.COX)[1]-1),
+                              "Jaccard",rep("",dim(AXES.sig_He.pic_JA.COX)[1]-1),
+                              "Hellinger",rep("",dim(AXES.sig_He.pic.path_He.COX)[1]-1),
+                              "Jaccard",rep("",dim(AXES.sig_He.pic.path_JA.COX)[1]-1))
+
+Diet_axes<-c(rownames(AXES.sig_Ja.16S_JA.COX),
+rownames(AXES.sig_Uw.16S_JA.COX),
+rownames(AXES.sig_He.16S_He.COX),
+rownames(AXES.sig_Wu.16S_He.COX),
+rownames(AXES.sig_He.pic_He.COX),
+rownames(AXES.sig_He.pic_JA.COX),
+rownames(AXES.sig_He.pic.path_He.COX),
+rownames(AXES.sig_He.pic.path_JA.COX))
+
+DF.axes<-data.frame(Microbiota_dissimilarities,
+                    Diet_dissimilarities,
+                    Diet_PCOA_axes=Diet_axes,
+                    DF.axes)
+
+write.table(DF.axes,
+            file = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/RDA_axes.txt",
+            sep="\t",row.names = F,quote = F)
+```
+
+#Joint species distribution models 
+In this section, low-abundance features are eliminated, and filtered abundance matrices for diet and microbiota (or metagenome predictions) are merged. In addition, offset matrice (including log-scaled read totals) and data frame with environmental covariates are prepared
+```{r message=FALSE}
+##########
+#cox data#
+##########
+
+#Select taxa for JDSM (only genera present in at least 10 samples considered)
+FILTER.cox<-taxa_sums(transform_sample_counts(Hirundo_insects.gen,function(x) ifelse(x>0,1,0)))>9
+FILTER.cox<-FILTER.cox[FILTER.cox==T]
+Hirundo_insects.gen.prune<-prune_taxa(taxa_names(Hirundo_insects.gen)%in%names(FILTER.cox),Hirundo_insects.gen)
+taxa_names(Hirundo_insects.gen.prune)<-gsub("OTU","COX",taxa_names(Hirundo_insects.gen.prune))
+
+#Prepare matrix with offset values (i.e. log transformed number of sequences)
+SSUMS_COX<-log(sample_sums(Hirundo_insects.gen))
+SSUMS_COX.mat<-matrix(rep(SSUMS_COX,ntaxa(Hirundo_insects.gen.prune)),
+                      nrow = nsamples(Hirundo_insects.gen.prune))
+
+rownames(SSUMS_COX.mat)<-sample_names(Hirundo_insects.gen.prune)
+colnames(SSUMS_COX.mat)<-taxa_names(Hirundo_insects.gen.prune)
+##########
+#16S data#
+##########
+
+FILTER.16S<-taxa_sums(transform_sample_counts(HIRUNDO_16S.taxo.phylo,function(x) ifelse(x>1,1,0)))>9
+FILTER.16S<-FILTER.16S[FILTER.16S==T]
+HIRUNDO_16S.taxo.phylo.prune<-prune_taxa(taxa_names(HIRUNDO_16S.taxo.phylo)%in%names(FILTER.16S),HIRUNDO_16S.taxo.phylo)
+taxa_names(HIRUNDO_16S.taxo.phylo.prune)<-gsub("OTU","BACT",taxa_names(HIRUNDO_16S.taxo.phylo.prune))
+
+SSUMS_BACT<-log(sample_sums(HIRUNDO_16S.taxo.phylo))
+SSUMS_BACT.mat<-matrix(rep(SSUMS_BACT,ntaxa(HIRUNDO_16S.taxo.phylo.prune)),nrow = nsamples(HIRUNDO_16S.taxo.phylo.prune))
+rownames(SSUMS_BACT.mat)<-sample_names(HIRUNDO_16S.taxo.phylo.prune)
+colnames(SSUMS_BACT.mat)<-taxa_names(HIRUNDO_16S.taxo.phylo.prune)
+
+##################################
+#Picrust predictions pathways#####
+##################################
+
+#only high-abundance features (> 0.1%) present in at least samples
+FILTER<-(taxa_sums(HIRUNDO_picrust_path)/sum(otu_table(HIRUNDO_picrust_path)))>0.005
+HIRUNDO_picrust_path.prune<-prune_taxa(FILTER,HIRUNDO_picrust_path)
+
+FILTER.pic<-taxa_sums(transform_sample_counts(HIRUNDO_picrust_path.prune,function(x) ifelse(x>1,1,0)))>9
+FILTER.pic<-FILTER.pic[FILTER.pic==T]
+HIRUNDO_picrust_path.prune<-prune_taxa(taxa_names(HIRUNDO_picrust_path.prune)%in%names(FILTER.pic),
+                                       HIRUNDO_picrust_path.prune)
+HIRUNDO_picrust_path.prune<-transform_sample_counts(HIRUNDO_picrust_path.prune,function(x) round(x/1000,0))
+
+SSUMS_PIC<-log(sample_sums(HIRUNDO_picrust_path)/1000)
+SSUMS_PIC_path.mat<-matrix(rep(SSUMS_PIC,ntaxa(HIRUNDO_picrust_path.prune)),nrow = nsamples(HIRUNDO_picrust_path.prune))
+rownames(SSUMS_PIC_path.mat)<-sample_names(HIRUNDO_picrust_path.prune)
+colnames(SSUMS_PIC_path.mat)<-taxa_names(HIRUNDO_picrust_path.prune)
+
+#################################################
+#Prepare community and offset matrices for JSDM##
+#################################################
+
+COX_final<-manage_unassigned(PHYLOSEQ = Hirundo_insects.gen.prune,UNASS_STRING=NA,ADD="",AFTER=TRUE)
+BACT_final<-manage_unassigned(PHYLOSEQ = HIRUNDO_16S.taxo.phylo.prune,UNASS_STRING=NA,ADD="",AFTER=TRUE)
+PIC.path_final<-HIRUNDO_picrust_path.prune
+
+taxa_names(COX_final)<-gsub("^ ","",as.character(tax_table(COX_final)[,"Genus"]))
+taxa_names(BACT_final)<-paste(taxa_names(BACT_final),tax_table(BACT_final)[,"Genus"],sep="__")
+taxa_names(PIC.path_final)<-paste(taxa_names(PIC.path_final),tax_table(PIC.path_final)[,2],sep="__")
+
+colnames(SSUMS_BACT.mat)<-paste(colnames(SSUMS_BACT.mat),tax_table(BACT_final)[,"Genus"],sep="__")
+colnames(SSUMS_COX.mat)<-gsub("^ ","",as.character(tax_table(COX_final)[,"Genus"]))
+colnames(SSUMS_PIC_path.mat)<-paste(colnames(SSUMS_PIC_path.mat),tax_table(PIC.path_final)[,2],sep="__")
+
+OTU_COX<-otu_table(COX_final)
+class(OTU_COX)<-"matrix"
+rownames(OTU_COX)<-sample_names(COX_final)
+
+OTU_BACT<-otu_table(BACT_final)
+class(OTU_BACT)<-"matrix"
+rownames(OTU_BACT)<-sample_names(BACT_final)
+
+OTU_PIC.path<-t(otu_table(PIC.path_final))
+class(OTU_PIC.path)<-"matrix"
+rownames(OTU_PIC.path)<-sample_names(PIC.path_final)
+
+#Same order of samples
+OTU_PIC.path <- OTU_PIC.path[ order(row.names(OTU_PIC.path)), ]
+OTU_BACT <- OTU_BACT[ order(row.names(OTU_BACT)), ]
+OTU_COX <- OTU_COX[ order(row.names(OTU_COX)), ]
+
+SSUMS_COX.mat <- SSUMS_COX.mat[ order(row.names(SSUMS_COX.mat)), ]
+SSUMS_BACT.mat <- SSUMS_BACT.mat[ order(row.names(SSUMS_BACT.mat)), ]
+SSUMS_PIC_path.mat <- SSUMS_PIC_path.mat[ order(row.names(SSUMS_PIC_path.mat)), ]
+
+SSUMS_BACT_COX<-cbind(SSUMS_BACT.mat,SSUMS_COX.mat)
+SSUMS_PIC.path_COX<-cbind(SSUMS_PIC_path.mat,SSUMS_COX.mat)
+
+colnames(SSUMS_BACT_COX)<-gsub(" ",".",colnames(SSUMS_BACT_COX))
+colnames(SSUMS_PIC.path_COX)<-gsub(" ",".",colnames(SSUMS_PIC.path_COX))
+
+OTU_BACT_COX<-data.frame(OTU_BACT,OTU_COX)
+OTU_PIC.path_COX<-data.frame(OTU_PIC.path,OTU_COX)
+
+colnames(SSUMS_BACT_COX)<-colnames(OTU_BACT_COX)
+colnames(SSUMS_PIC.path_COX)<-colnames(OTU_PIC.path_COX)
+
+#######################
+#EXPLANATORY VARIABLES#
+#######################
+
+#kubic poly
+POLY<-poly(as.numeric(sample_data(COX_final)$JULIAN_DATE.c),3)
+
+DAT.prem3<-data.frame(JULIAN_DATE.1=POLY[,1],
+                      JULIAN_DATE.2=POLY[,2],
+                      JULIAN_DATE.3=POLY[,3],
+                      Adult=as.numeric(sample_data(COX_final)$Adult_vs_Young=="Adult"),
+                      Pulec_Kraus=as.numeric(sample_data(COX_final)$Locality=="Pulec_Kraus"))
+rownames(DAT.prem3)<-sample_names(COX_final)
+
+#quadratic poly
+POLY<-poly(as.numeric(sample_data(COX_final)$JULIAN_DATE.c),2)
+
+DAT.prem2<-data.frame(JULIAN_DATE.1=POLY[,1],
+                      JULIAN_DATE.2=POLY[,2],
+                      Adult=as.numeric(sample_data(COX_final)$Adult_vs_Young=="Adult"),
+                      Pulec_Kraus=as.numeric(sample_data(COX_final)$Locality=="Pulec_Kraus"))
+rownames(DAT.prem2)<-sample_names(COX_final)
+
+
+####Sort matrices####
+DAT.prem3 <- DAT.prem3[ order(row.names(DAT.prem3)), ]
+DAT.prem2 <- DAT.prem2[ order(row.names(DAT.prem2)), ]
+
+
+
+```
+
+#Joint species distribution models
+Here we fitted joint species distribution models using boral package. Cubic + quadratic + linear effect of Julian date of just quadratic + linear effects are considered in alternative models. Separate models were fitted for diet x microbiota and diet x predicted metagenomes. This step takes several hours  
+```{r message=FALSE}
+library(boral)
+ 
+example_mcmc_control2 <- list(n.burnin = 10000, n.iteration = 50000,
+                              n.thin = 40)
+
+#####################################
+#DIET vs. MICROBIOTA#################
+#####################################
+
+
+# #Julian date - cubic polynom
+# system.time(Boral_bact_diet_cub <- boral(y=OTU_BACT_COX, X = DAT.prem3, family = "negative.binomial",
+#                       lv.control = list(num.lv = 4),
+#                       row.eff = "none",
+#                       offset = SSUMS_BACT_COX,
+#                       save.model = T, #ulozi model dulezity pro varpart
+#                       calc.ics = T,
+#                       mcmc.control = example_mcmc_control2))
+# 
+# #Julian date - quadratic polynom
+# system.time(Boral_bact_diet_qua <- boral(y=OTU_BACT_COX, X = DAT.prem2, family = "negative.binomial",
+#                       lv.control = list(num.lv = 4),
+#                       row.eff = "none",
+#                       offset = SSUMS_BACT_COX,
+#                       save.model = T, #ulozi model dulezity pro varpart
+#                       calc.ics = T,
+#                       mcmc.control = example_mcmc_control2))
+# 
+# save(Boral_bact_diet_cub,
+#      file = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Boral_bact_diet_cub.R")
+# save(Boral_bact_diet_qua,
+#      file = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Boral_bact_diet_qua.R")
+
+#####################################
+#DIET vs. METAGENOME PATHAYS#########
+#####################################
+
+# 
+# #Julian date - cubic polynom
+# system.time(Boral_pic.path_diet_cub <- boral(y=OTU_PIC.path_COX, X = DAT.prem3, family = "negative.binomial",
+#                       lv.control = list(num.lv = 4),
+#                       row.eff = "none",
+#                       offset = SSUMS_PIC.path_COX,
+#                       save.model = T, #ulozi model dulezity pro varpart
+#                       calc.ics = T,
+#                       mcmc.control = example_mcmc_control2))
+# 
+# save(Boral_pic.path_diet_cub,
+#      file = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Boral_pic.path_diet_cub.R")
+# 
+# #Julian date - quadratic polynom
+# system.time(Boral_pic.path_diet_qua <- boral(y=OTU_PIC.path_COX, X = DAT.prem2, family = "negative.binomial",
+#                       lv.control = list(num.lv = 4),
+#                       row.eff = "none",
+#                       offset = SSUMS_PIC.path_COX,
+#                       save.model = T, #ulozi model dulezity pro varpart
+#                       calc.ics = T,
+#                       mcmc.control = example_mcmc_control2))
+# 
+# save(Boral_pic.path_diet_qua,
+#      file = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Boral_pic.path_diet_qua.R")
+# 
+
+
+load("/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Boral_bact_diet_cub.R")
+load("/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Boral_bact_diet_qua.R")
+
+
+load("/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Boral_pic.path_diet_cub.R")
+load("/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/Boral_pic.path_diet_qua.R")
+
+```
+
+
+
+#JSDM - Diet x microbiota correlations
+[1] Residual correlations for diet x microbiota are extracted for JSDM models assuming either Cubic + quadratic + linear or just quadratic + linear effect of Julian date. [2] Only residual correlations that recieved high level of support in both models (> 95%) are retained and [3] their network is constructed and vizulaized using ggraph() fuction. 
+```{r message=FALSE, fig.width=15,fig.height=12}
+library(ggraph)
+library(igraph)
+library(scales)
+
+rescors.cub<-get.residual.cor(Boral_bact_diet_cub,prob = 0.95)
+rescors.qua<-get.residual.cor(Boral_bact_diet_qua,prob = 0.95)
+
+#Select correlations between diet and bacteria
+SIG.res.cub<-rescors.cub$sig.cor[-grep("ASV_",rownames(rescors.cub$sig.cor)),
+                                grep("ASV_",rownames(rescors.cub$sig.cor))]
+SIG.res.qua<-rescors.qua$sig.cor[-grep("ASV_",rownames(rescors.qua$sig.cor)),
+                                 grep("ASV_",rownames(rescors.qua$sig.cor))]
+
+#Correlations sifnificant for all model version
+CONSENSUS<-SIG.res.cub*SIG.res.qua!=0
+sum(CONSENSUS)
+
+#Average values for conseunsual correlations coefficients
+SIG.res<-(SIG.res.cub+SIG.res.qua)/2*CONSENSUS
+
+SIG.res.sig<-SIG.res[rowSums(SIG.res)!=0,colSums(SIG.res)!=0]
+COR<-as.data.frame(as.table(SIG.res.sig))
+
+COR<-COR[abs(COR$Freq)>0,]
+COR$Var2<-gsub("__","\n",COR$Var2)
+
+names(COR)[3]<-"Residual_cor."
+graph <- graph_from_data_frame(COR,directed = F)
+graph <- create_layout(graph, layout = 'dh')
+GG<-ggraph(graph) +
+  geom_edge_link(aes( color = Residual_cor.), edge_width = 1) +
+  guides(edge_alpha = "none", edge_width = "none") +
+  scale_edge_color_gradient2(low = muted("blue"), mid = "white",
+                             high = muted("red"), midpoint = 0, space = "Lab",
+                             na.value = "grey50", guide = "edge_colourbar")+
+  geom_node_point(color = "gray",  size = 1) +
+  geom_node_text(aes(label = name), repel = TRUE,size=2.5) +
+  theme_graph()
+
+GG+guides(fill=guide_colorbar(barwidth=0.5))
+GG+theme(legend.position = "bottom")
+
+ggsave(GG+guides(colour=guide_colourbar(barwidth=10))+theme(legend.position = "bottom"),
+       filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/boral.micro.consensus.pdf",
+       width = 15, height = 12, units = "cm", device = cairo_ps)
+
+ggsave(GG+guides(colour=guide_colourbar(barwidth=10))+theme(legend.position = "bottom"),
+       filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/boral.micro.consensus.tiff",
+       width = 15, height = 12, units = "cm", dpi = 400)
+```
+
+#JSDM - Diet x predicted metagenome correlations
+The same as above, but for predicted metagenome pathways.
+```{r message=FALSE, fig.width=15,fig.height=12}
+rescors.cub<-get.residual.cor(Boral_pic.path_diet_cub,prob = 0.95)
+rescors.qua<-get.residual.cor(Boral_pic.path_diet_qua,prob = 0.95)
+
+#Select correlations between diet and bacteria
+SIG.res.cub<-rescors.cub$sig.cor[-grep("__",rownames(rescors.cub$sig.cor)),
+                                grep("__",rownames(rescors.cub$sig.cor))]
+SIG.res.qua<-rescors.qua$sig.cor[-grep("__",rownames(rescors.qua$sig.cor)),
+                                 grep("__",rownames(rescors.qua$sig.cor))]
+
+#Correlations significant for both model versions
+CONSENSUS<-SIG.res.cub*SIG.res.qua!=0
+sum(CONSENSUS)
+
+#Average values for conseunsual correlations coefficients
+SIG.res<-(SIG.res.cub+SIG.res.qua)/2*CONSENSUS
+
+SIG.res.sig<-SIG.res[rowSums(SIG.res)!=0,colSums(SIG.res)!=0]
+COR<-as.data.frame(as.table(SIG.res.sig))
+
+COR<-COR[abs(COR$Freq)>0,]
+COR$Var2<-gsub("__","\n",COR$Var2)
+
+
+COR$Var2<-gsub("__","\n",COR$Var2)
+COR$Var2<-gsub(".biosynthesis","",COR$Var2)
+COR$Var2<-gsub(".de.novo","",COR$Var2)
+COR$Var2<-gsub(".de.novo","",COR$Var2)
+COR$Var2<-gsub("..engineered","",COR$Var2)
+COR$Var2<-gsub("[.]"," ",COR$Var2)
+COR$Var2<-gsub("  "," ",COR$Var2)
+COR$Var2<-gsub("superpathway of ","",COR$Var2)
+COR$Var2<-gsub(" pathway","",COR$Var2)
+
+
+names(COR)[3]<-"Residual_cor."
+graph <- graph_from_data_frame(COR,directed = F)
+graph <- create_layout(graph, layout = 'dh')
+GG<-ggraph(graph) +
+  geom_edge_link(aes( color = Residual_cor.), edge_width = 1) +
+  guides(edge_alpha = "none", edge_width = "none") +
+  scale_edge_color_gradient2(low = muted("blue"), mid = "white",
+                             high = muted("red"), midpoint = 0, space = "Lab",
+                             na.value = "grey50", guide = "edge_colourbar")+
+  geom_node_point(color = "gray",  size = 1) +
+  geom_node_text(aes(label = name), repel = TRUE,size=2.5) +
+  theme_graph()
+
+GG+guides(fill=guide_colorbar(barwidth=0.5))
+GG+theme(legend.position = "bottom")
+
+ggsave(GG+guides(colour=guide_colourbar(barwidth=10))+theme(legend.position = "bottom"),
+       filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/boral.path.consensus.pdf",
+       width = 15, height =15, units = "cm", device = cairo_ps)
+
+ggsave(GG+guides(colour=guide_colourbar(barwidth=10))+theme(legend.position = "bottom"),
+       filename = "/media/kreising/DATA/data/POTRAVA_10_4_2018/vlastovky_potrava/Sci_Rep_anal/RESULTS/boral.path.consensus.tiff",
+       width = 15, height =15, units = "cm",dpi = 400)
+
+```
+
+
